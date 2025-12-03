@@ -1,0 +1,34 @@
+{
+  "name": "HHS Finance",
+  "short_name": "HHS Fin",
+  "id": "hhs-finance-pwa-v1",
+  "description": "Smart finance tracker with AI insights.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2382/2382461.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2382/2382461.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Add Transaction",
+      "short_name": "Add",
+      "description": "Add a new transaction",
+      "url": "/?action=add",
+      "icons": [{ "src": "https://cdn-icons-png.flaticon.com/512/2382/2382461.png", "sizes": "192x192" }]
+    }
+  ]
+}

@@ -2,7 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <!-- PWA Setup -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2382/2382461.png">
+    
+    <!-- CRITICAL: This allows Google to verify the request comes from your Authorized Origin -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>HHS Finance</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -39,15 +48,45 @@
       .dark ::-webkit-scrollbar-thumb { background: #475569; }
       ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
       
+      /* Mobile Safe Area Handling */
+      .safe-area-bottom {
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+      
+      /* Robust Printing Styles */
       @media print {
-        .print\:hidden { display: none !important; }
-        .bg-slate-50 { background-color: white !important; }
-        .text-white { color: black !important; }
+        /* Force hide the main application UI */
+        .print-hidden { 
+          display: none !important; 
+        }
+        
+        /* Force show the print report */
+        .print-visible { 
+          display: block !important; 
+        }
+        
+        /* Reset page properties for clean printing */
+        html, body {
+          background-color: white !important;
+          color: black !important;
+          height: auto !important;
+          overflow: visible !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+
+        /* Ensure background colors (like table headers) are printed */
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+
+        /* Remove shadows and borders that look bad in print */
+        .shadow-sm, .shadow-md, .shadow-lg, .shadow-xl {
+          box-shadow: none !important;
+        }
       }
     </style>
-    <!-- Google API Scripts -->
-    <script src="https://apis.google.com/js/api.js"></script>
-    <script src="https://accounts.google.com/gsi/client"></script>
 <script type="importmap">
 {
   "imports": {
@@ -68,6 +107,20 @@
 </head>
 <body>
     <div id="root"></div>
+    <script>
+      // Register Service Worker for Offline Capabilities
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+              console.log('ServiceWorker registration successful');
+            })
+            .catch(err => {
+              console.log('ServiceWorker registration failed: ', err);
+            });
+        });
+      }
+    </script>
 <script type="module" src="/index.tsx"></script>
 </body>
 </html>

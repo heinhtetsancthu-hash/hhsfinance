@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { AppState, Category, Language, Transaction, TransactionType, BackupData } from './types';
 import { DEFAULT_CATEGORIES, TRANSLATIONS, ICONS } from './constants';
@@ -6,7 +7,8 @@ import TransactionList from './components/TransactionList';
 import Settings from './components/Settings';
 import Button from './components/Button';
 import Login from './components/Login';
-import { initGoogleDrive, handleDriveAuth, backupToDrive, restoreLatestFromDrive, getDriveUser } from './services/googleDrive';
+import PrintReport from './components/PrintReport';
+import { saveToFirestore, subscribeToData, isFirebaseReady } from './services/firebase';
 
 // Initial State
 const initialState: AppState = {
@@ -14,6 +16,9 @@ const initialState: AppState = {
   categories: DEFAULT_CATEGORIES,
   currency: 'USD',
 };
+
+// Since we are using a shared "admin" login, we use a fixed ID for the database document
+const DB_USER_ID = 'admin_default';
 
 type View = 'dashboard' | 'transactions' | 'settings';
 
@@ -46,51 +51,65 @@ function App() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordAction, setPasswordAction] = useState<{ fn: () => void } | null>(null);
 
-  // Drive API State
-  const [isDriveReady, setIsDriveReady] = useState(false);
-  const [driveUser, setDriveUser] = useState<any>(null);
-  const [driveLoading, setDriveLoading] = useState(false);
-  const [backupMsg, setBackupMsg] = useState('');
-  
-  // Sync Modal State
-  const [showSyncModal, setShowSyncModal] = useState(false);
+  // Logout Confirmation Modal State
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+
+  // Network Status State
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // --- Effects ---
 
-  // 1. Initialize Google Drive Client
+  // 1. Local Storage Persistence & Firestore Subscription
   useEffect(() => {
-    if (isAuthenticated) {
-        initGoogleDrive((inited) => {
-            setIsDriveReady(inited);
-            // Auto check user
-            if (inited) {
-               getDriveUser().then(user => {
-                  if (user) setDriveUser(user);
-               });
-            }
-        });
-    }
-  }, [isAuthenticated]);
-
-  // 2. Local Storage Persistence
-  useEffect(() => {
-    localStorage.setItem('smartFinanceData', JSON.stringify(state));
-  }, [state]);
-
-  useEffect(() => {
+    // Save language and theme settings
     localStorage.setItem('smartFinanceLang', lang);
-  }, [lang]);
-
-  useEffect(() => {
-    const html = document.documentElement;
     if (isDark) {
-      html.classList.add('dark');
+      document.documentElement.classList.add('dark');
       localStorage.setItem('smartFinanceTheme', 'dark');
     } else {
-      html.classList.remove('dark');
+      document.documentElement.classList.remove('dark');
       localStorage.setItem('smartFinanceTheme', 'light');
     }
-  }, [isDark]);
+  }, [lang, isDark]);
+
+  // 2. Database Subscription
+  useEffect(() => {
+    if (isAuthenticated && isFirebaseReady && isOnline) {
+      // Subscribe to Firestore changes
+      const unsubscribe = subscribeToData(DB_USER_ID, (cloudData) => {
+        // Merge cloud data with local state structure to ensure validity
+        setState(prev => ({
+          ...prev,
+          transactions: cloudData.transactions || [],
+          categories: cloudData.categories || DEFAULT_CATEGORIES,
+          currency: cloudData.currency || 'USD'
+        }));
+      });
+      return () => unsubscribe();
+    }
+  }, [isAuthenticated, isOnline]);
+
+  // 3. Network Listeners
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // --- Helpers for Persistence ---
+  // We use this to save to BOTH LocalStorage (offline) and Firestore (cloud)
+  const persistState = (newState: AppState) => {
+    setState(newState);
+    localStorage.setItem('smartFinanceData', JSON.stringify(newState));
+    if (isAuthenticated && isOnline) {
+      saveToFirestore(DB_USER_ID, newState);
+    }
+  };
 
   // --- Handlers ---
   const handleLogin = (u: string, p: string) => {
@@ -106,7 +125,56 @@ function App() {
     setIsAuthenticated(false);
     localStorage.removeItem('smartFinance_auth');
     setCurrentView('dashboard');
-    setDriveUser(null);
+    setShowLogoutModal(false);
+  };
+
+  // --- Backup & Logout Logic ---
+  const prepareBackupData = (): BackupData => {
+    return {
+        appState: state,
+        settings: {
+            lang,
+            isDark
+        },
+        metadata: {
+            version: '1.1',
+            timestamp: new Date().toISOString(),
+            description: `Backup with ${state.transactions.length} transactions and ${state.categories.length} categories.`
+        }
+    };
+  };
+
+  const handleBackup = () => {
+    try {
+        const backupData = prepareBackupData();
+        const dataStr = JSON.stringify(backupData, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `HHS_Finance_Backup_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+        console.error("Backup failed", e);
+        alert("Failed to create backup file. Please try again.");
+    }
+  };
+
+  const handleLogoutRequest = () => {
+      setShowLogoutModal(true);
+  };
+
+  const confirmLogoutAndBackup = () => {
+      // 1. Trigger Backup
+      handleBackup();
+      
+      // 2. Delay logout slightly to allow file download to register
+      setTimeout(() => {
+          handleLogout();
+      }, 500);
   };
 
   // Secure Action Wrapper
@@ -133,31 +201,25 @@ function App() {
       id: Date.now().toString(),
     };
     
-    setState(prev => {
-        const newState = { ...prev, transactions: [newTransaction, ...prev.transactions] };
-        return newState;
-    });
+    const newState = { ...state, transactions: [newTransaction, ...state.transactions] };
+    persistState(newState);
     setShowTransactionModal(false);
   };
 
   const updateTransaction = (updatedT: Transaction) => {
-    setState(prev => {
-        const newState = {
-            ...prev,
-            transactions: prev.transactions.map(t => t.id === updatedT.id ? updatedT : t)
-        };
-        return newState;
-    });
+    const newState = {
+        ...state,
+        transactions: state.transactions.map(t => t.id === updatedT.id ? updatedT : t)
+    };
+    persistState(newState);
     setShowTransactionModal(false);
     setEditingTransaction(null);
   };
 
   const handleDeleteRequest = (id: string) => {
     requestSecureAction(() => {
-         setState(prev => {
-             const newState = { ...prev, transactions: prev.transactions.filter(t => t.id !== id) };
-             return newState;
-         });
+         const newState = { ...state, transactions: state.transactions.filter(t => t.id !== id) };
+         persistState(newState);
     });
   };
 
@@ -174,27 +236,21 @@ function App() {
   };
 
   const addCategory = (c: Category) => {
-    setState(prev => {
-        const newState = { ...prev, categories: [...prev.categories, c] };
-        return newState;
-    });
+    const newState = { ...state, categories: [...state.categories, c] };
+    persistState(newState);
   };
 
   const updateCategory = (updatedCat: Category) => {
-    setState(prev => {
-        const newState = { 
-            ...prev, 
-            categories: prev.categories.map(c => c.id === updatedCat.id ? updatedCat : c) 
-        };
-        return newState;
-    });
+    const newState = { 
+        ...state, 
+        categories: state.categories.map(c => c.id === updatedCat.id ? updatedCat : c) 
+    };
+    persistState(newState);
   };
 
   const deleteCategory = (id: string) => {
-     setState(prev => {
-         const newState = { ...prev, categories: prev.categories.filter(c => c.id !== id) };
-         return newState;
-     });
+     const newState = { ...state, categories: state.categories.filter(c => c.id !== id) };
+     persistState(newState);
   };
 
   // Improved Import/Restore Handler
@@ -216,7 +272,8 @@ function App() {
 
     // Apply State
     if (importedState && Array.isArray(importedState.transactions) && Array.isArray(importedState.categories)) {
-        setState(importedState);
+        // We use persistState here to ensure the imported data is sent to DB immediately
+        persistState(importedState);
     } else {
         console.error("Invalid data structure found during import");
         return false; // Failed
@@ -232,82 +289,8 @@ function App() {
   };
 
   const setCurrency = (currency: string) => {
-    setState(prev => {
-        const newState = { ...prev, currency };
-        return newState;
-    });
-  };
-
-  // --- Drive Handlers ---
-  const prepareBackupData = (): BackupData => {
-    return {
-        appState: state,
-        settings: {
-            lang,
-            isDark
-        },
-        metadata: {
-            version: '1.1',
-            timestamp: new Date().toISOString(),
-            description: `Backup with ${state.transactions.length} transactions and ${state.categories.length} categories.`
-        }
-    };
-  };
-
-  const handleConnectDrive = async () => {
-      if (!isDriveReady) {
-          alert("Google Drive API not initialized. Check your internet or API keys.");
-          return;
-      }
-      try {
-          await handleDriveAuth();
-          const user = await getDriveUser();
-          setDriveUser(user);
-      } catch (e: any) {
-          console.error(e);
-          if (e.error === 'popup_closed_by_user') return;
-          alert("Failed to connect to Google Drive");
-      }
-  };
-
-  const handleDriveBackup = async () => {
-      setDriveLoading(true);
-      setBackupMsg('');
-      try {
-          const backupData = prepareBackupData();
-          await backupToDrive(backupData);
-          setBackupMsg(t.backupSuccess[lang]);
-          setTimeout(() => setBackupMsg(''), 3000);
-      } catch (e) {
-          console.error(e);
-          alert("Backup failed. See console.");
-      } finally {
-          setDriveLoading(false);
-      }
-  };
-
-  const handleDriveRestore = async () => {
-      setDriveLoading(true);
-      setBackupMsg('');
-      try {
-          const data = await restoreLatestFromDrive();
-          if (data) {
-              const success = handleImport(data);
-              if (success) {
-                 setBackupMsg(t.restoreSuccess[lang]);
-              } else {
-                 setBackupMsg("Format Error"); 
-              }
-          } else {
-              setBackupMsg(t.noBackupFound[lang]);
-          }
-          setTimeout(() => setBackupMsg(''), 3000);
-      } catch (e) {
-          console.error(e);
-          alert("Restore failed. See console.");
-      } finally {
-          setDriveLoading(false);
-      }
+    const newState = { ...state, currency };
+    persistState(newState);
   };
 
   // --- Render Helpers ---
@@ -449,6 +432,50 @@ function App() {
     );
   };
 
+  const LogoutConfirmModal = () => {
+    if (!showLogoutModal) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+             <div className="bg-white dark:bg-slate-800 rounded-xl shadow-xl w-full max-w-sm overflow-hidden animate-fadeIn p-6">
+                <div className="text-center mb-4">
+                    <div className="w-12 h-12 bg-red-100 dark:bg-red-900 rounded-full flex items-center justify-center mx-auto mb-2 text-red-600 dark:text-red-400">
+                        <ICONS.LogOut size={24} />
+                    </div>
+                    <h3 className="font-bold text-lg text-slate-900 dark:text-white">
+                        {lang === 'en' ? 'Log Out' : 'အကောင့်ထွက်ရန်'}
+                    </h3>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">
+                        {lang === 'en' 
+                          ? 'Do you want to backup your data before logging out?' 
+                          : 'အကောင့်မထွက်မီ ဒေတာများကို သိမ်းဆည်းလိုပါသလား?'}
+                    </p>
+                </div>
+                
+                <div className="flex flex-col gap-3">
+                     <Button 
+                        type="button" 
+                        variant="primary" 
+                        onClick={confirmLogoutAndBackup} 
+                        className="w-full"
+                    >
+                        {lang === 'en' ? 'Backup & Log Out' : 'သိမ်းဆည်းပြီး ထွက်မည်'}
+                    </Button>
+                    
+                     <Button 
+                        type="button" 
+                        variant="ghost" 
+                        onClick={() => setShowLogoutModal(false)} 
+                        className="w-full"
+                    >
+                        {t.cancel[lang]}
+                    </Button>
+                </div>
+             </div>
+        </div>
+    );
+  };
+
   const PasswordModal = () => {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -500,68 +527,6 @@ function App() {
     );
   };
 
-  const SyncModal = () => {
-      if (!showSyncModal) return null;
-
-      return (
-        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
-            <div className="bg-white dark:bg-slate-800 rounded-xl shadow-xl w-full max-w-sm overflow-hidden animate-fadeIn p-6">
-                <div className="text-center mb-4">
-                    <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mx-auto mb-2 text-blue-600 dark:text-blue-400">
-                        <ICONS.Cloud size={24} />
-                    </div>
-                    <h3 className="font-bold text-lg text-slate-900 dark:text-white">{t.syncData[lang]}</h3>
-                    <p className="text-sm text-slate-500 mt-2">{t.syncDesc[lang]}</p>
-                </div>
-
-                {!driveUser ? (
-                    <div className="text-center">
-                        <Button onClick={handleConnectDrive} className="w-full mb-2">
-                             <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" alt="Drive" className="w-5 h-5 mr-2"/>
-                             {t.connectDrive[lang]}
-                        </Button>
-                    </div>
-                ) : (
-                    <div className="space-y-4">
-                        <div className="p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                            <h4 className="font-medium text-sm text-slate-700 dark:text-slate-300 mb-2">{t.step1[lang]}</h4>
-                            <Button 
-                                onClick={handleDriveBackup} 
-                                disabled={driveLoading}
-                                className="w-full bg-blue-600 hover:bg-blue-700"
-                                icon={driveLoading ? <ICONS.RefreshCw className="animate-spin"/> : <ICONS.CloudUpload />}
-                            >
-                                {t.uploadToCloud[lang]}
-                            </Button>
-                        </div>
-                        <div className="p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                            <h4 className="font-medium text-sm text-slate-700 dark:text-slate-300 mb-2">{t.step2[lang]}</h4>
-                            <Button 
-                                onClick={handleDriveRestore} 
-                                disabled={driveLoading}
-                                className="w-full bg-green-600 hover:bg-green-700"
-                                icon={driveLoading ? <ICONS.RefreshCw className="animate-spin"/> : <ICONS.CloudDownload />}
-                            >
-                                {t.downloadFromCloud[lang]}
-                            </Button>
-                        </div>
-                         {backupMsg && (
-                            <p className={`text-sm text-center font-medium animate-fadeIn ${backupMsg === t.noBackupFound[lang] || backupMsg === "Format Error" ? 'text-red-500' : 'text-green-600'}`}>
-                                {backupMsg}
-                            </p>
-                        )}
-                    </div>
-                )}
-                <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">
-                    <Button variant="ghost" onClick={() => setShowSyncModal(false)} className="w-full">
-                        {t.cancel[lang]}
-                    </Button>
-                </div>
-            </div>
-        </div>
-      );
-  };
-
   if (!isAuthenticated) {
     return (
       <Login 
@@ -575,135 +540,154 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 transition-colors duration-200">
       
-      {/* Mobile Header */}
-      <header className="md:hidden bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 p-4 sticky top-0 z-30 flex justify-between items-center">
-        <h1 className="font-bold text-xl text-blue-600 dark:text-blue-400">HHS Finance</h1>
-        <div className="flex items-center gap-2">
-            <button
-                onClick={() => setShowSyncModal(true)}
-                className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 p-2 rounded-full hover:bg-slate-200"
-            >
-                <ICONS.Cloud size={20} />
-            </button>
-            <button 
-                onClick={openAddModal}
-                className="bg-blue-600 text-white p-2 rounded-full shadow-lg hover:bg-blue-700 active:scale-95 transition-transform"
-            >
-                <ICONS.Plus size={20} />
-            </button>
+      {/* Offline Banner */}
+      {!isOnline && (
+        <div className="bg-slate-800 text-white text-xs py-1 text-center font-medium safe-area-top print-hidden">
+            {lang === 'en' ? 'You are currently offline. Changes are saved locally.' : 'အင်တာနက်ပြတ်တောက်နေပါသည်။ အချက်အလက်များ ဖုန်းထဲတွင် သိမ်းဆည်းထားပါမည်။'}
         </div>
-      </header>
+      )}
 
-      <div className="flex h-screen overflow-hidden">
-        
-        {/* Sidebar (Desktop) */}
-        <aside className="hidden md:flex flex-col w-64 bg-white dark:bg-slate-800 border-r border-slate-200 dark:border-slate-700 print:hidden">
-            <div className="p-6">
-                <h1 className="font-bold text-2xl text-blue-600 dark:text-blue-400 flex items-center gap-2">
-                    <ICONS.Wallet /> HHS Finance
-                </h1>
+      {/* Screen View - Hidden on Print */}
+      <div className="print-hidden">
+          {/* Mobile Header */}
+          <header className="md:hidden bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 p-4 sticky top-0 z-30 flex justify-between items-center">
+            <div className="flex items-center gap-3">
+              <h1 className="font-bold text-xl text-blue-600 dark:text-blue-400 flex items-center gap-2">
+                  HHS Finance
+                  {isFirebaseReady && isOnline && <div className="w-2 h-2 rounded-full bg-green-500"></div>}
+                  {(!isOnline) && <div className="w-2 h-2 rounded-full bg-slate-400"></div>}
+              </h1>
+              <button 
+                  type="button"
+                  onClick={handleLogoutRequest} 
+                  className="p-1 text-red-500 hover:bg-red-50 rounded dark:hover:bg-slate-700 transition-colors"
+                  title={t.logout[lang]}
+              >
+                  <ICONS.LogOut size={18} />
+              </button>
             </div>
-            <nav className="flex-1 px-4 space-y-2">
+            <div className="flex items-center gap-2">
                 <button 
-                  onClick={() => setCurrentView('dashboard')}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'dashboard' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+                    onClick={openAddModal}
+                    className="bg-blue-600 text-white p-2 rounded-full shadow-lg hover:bg-blue-700 active:scale-95 transition-transform"
                 >
-                    <ICONS.LayoutDashboard size={20} /> {t.dashboard[lang]}
+                    <ICONS.Plus size={20} />
                 </button>
-                <button 
-                  onClick={() => setCurrentView('transactions')}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'transactions' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
-                >
-                    <ICONS.List size={20} /> {t.transactions[lang]}
-                </button>
-                <button 
-                  onClick={() => setCurrentView('settings')}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'settings' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
-                >
-                    <ICONS.SettingsIcon size={20} /> {t.settings[lang]}
-                </button>
-                <div className="pt-4 mt-4 border-t border-slate-100 dark:border-slate-700">
-                    <button
-                        onClick={() => setShowSyncModal(true)}
-                        className="w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700"
+            </div>
+          </header>
+
+          <div className="flex h-screen overflow-hidden">
+            
+            {/* Sidebar (Desktop) */}
+            <aside className="hidden md:flex flex-col w-64 bg-white dark:bg-slate-800 border-r border-slate-200 dark:border-slate-700 print-hidden">
+                <div className="p-6">
+                    <h1 className="font-bold text-2xl text-blue-600 dark:text-blue-400 flex items-center gap-2">
+                        <ICONS.Wallet /> HHS Finance
+                        {isFirebaseReady && isOnline && <div className="w-2 h-2 rounded-full bg-green-500 ml-1" title="Cloud Sync Active"></div>}
+                        {!isOnline && <div className="w-2 h-2 rounded-full bg-slate-400 ml-1" title="Offline"></div>}
+                    </h1>
+                    <button 
+                        type="button"
+                        onClick={handleLogoutRequest}
+                        className="flex items-center gap-1.5 mt-2 text-sm text-red-500 hover:text-red-700 dark:hover:text-red-400 font-medium transition-colors"
                     >
-                         <ICONS.Cloud size={20} /> {t.syncData[lang]}
+                         <ICONS.LogOut size={14} /> {t.logout[lang]}
                     </button>
                 </div>
-            </nav>
-            <div className="p-4">
-                <Button onClick={openAddModal} className="w-full gap-2 shadow-lg shadow-blue-500/30">
-                    <ICONS.Plus size={18} /> {t.addTransaction[lang]}
-                </Button>
-            </div>
-        </aside>
+                <nav className="flex-1 px-4 space-y-2">
+                    <button 
+                      onClick={() => setCurrentView('dashboard')}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'dashboard' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+                    >
+                        <ICONS.LayoutDashboard size={20} /> {t.dashboard[lang]}
+                    </button>
+                    <button 
+                      onClick={() => setCurrentView('transactions')}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'transactions' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+                    >
+                        <ICONS.List size={20} /> {t.transactions[lang]}
+                    </button>
+                    <button 
+                      onClick={() => setCurrentView('settings')}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${currentView === 'settings' ? 'bg-blue-50 text-blue-600 dark:bg-slate-700 dark:text-blue-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+                    >
+                        <ICONS.SettingsIcon size={20} /> {t.settings[lang]}
+                    </button>
+                </nav>
+                <div className="p-4">
+                    <Button onClick={openAddModal} className="w-full gap-2 shadow-lg shadow-blue-500/30">
+                        <ICONS.Plus size={18} /> {t.addTransaction[lang]}
+                    </Button>
+                </div>
+            </aside>
 
-        {/* Main Content */}
-        <main className="flex-1 overflow-auto p-4 md:p-8 relative scroll-smooth">
-          <div className="max-w-6xl mx-auto pb-20 md:pb-0">
-             {currentView === 'dashboard' && <Dashboard state={state} lang={lang} />}
-             {currentView === 'transactions' && (
-                <TransactionList 
-                    state={state} 
-                    onDelete={handleDeleteRequest} 
-                    onEdit={handleEditRequest} 
-                    lang={lang} 
-                />
-             )}
-             {currentView === 'settings' && (
-                <Settings 
-                  state={state} 
-                  lang={lang} 
-                  toggleLang={() => setLang(l => l === 'en' ? 'my' : 'en')}
-                  isDark={isDark}
-                  toggleTheme={() => setIsDark(d => !d)}
-                  onImport={handleImport}
-                  addCategory={addCategory}
-                  updateCategory={updateCategory}
-                  deleteCategory={deleteCategory}
-                  setCurrency={setCurrency}
-                  onLogout={handleLogout}
-                  isDriveReady={isDriveReady}
-                  driveUser={driveUser}
-                  driveLoading={driveLoading}
-                  backupMsg={backupMsg}
-                  onConnectDrive={handleConnectDrive}
-                  onDriveBackup={handleDriveBackup}
-                  onDriveRestore={handleDriveRestore}
-                />
-             )}
+            {/* Main Content */}
+            <main className="flex-1 overflow-auto p-4 md:p-8 relative scroll-smooth">
+              <div className="max-w-6xl mx-auto pb-20 md:pb-0">
+                {currentView === 'dashboard' && <Dashboard state={state} lang={lang} />}
+                {currentView === 'transactions' && (
+                    <TransactionList 
+                        state={state} 
+                        onDelete={handleDeleteRequest} 
+                        onEdit={handleEditRequest} 
+                        lang={lang} 
+                    />
+                )}
+                {currentView === 'settings' && (
+                    <Settings 
+                      state={state} 
+                      lang={lang} 
+                      toggleLang={() => setLang(l => l === 'en' ? 'my' : 'en')}
+                      isDark={isDark}
+                      toggleTheme={() => setIsDark(d => !d)}
+                      onImport={handleImport}
+                      onBackup={handleBackup}
+                      addCategory={addCategory}
+                      updateCategory={updateCategory}
+                      deleteCategory={deleteCategory}
+                      setCurrency={setCurrency}
+                      onLogout={handleLogoutRequest}
+                    />
+                )}
+              </div>
+            </main>
           </div>
-        </main>
+
+          {/* Mobile Bottom Nav */}
+          <nav className="md:hidden fixed bottom-0 w-full bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex justify-around p-3 z-30 print-hidden safe-area-bottom">
+            <button 
+                onClick={() => setCurrentView('dashboard')}
+                className={`flex flex-col items-center gap-1 ${currentView === 'dashboard' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
+            >
+                <ICONS.LayoutDashboard size={24} />
+                <span className="text-[10px]">{t.dashboard[lang]}</span>
+            </button>
+            <button 
+                onClick={() => setCurrentView('transactions')}
+                className={`flex flex-col items-center gap-1 ${currentView === 'transactions' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
+            >
+                <ICONS.List size={24} />
+                <span className="text-[10px]">{t.transactions[lang]}</span>
+            </button>
+            <button 
+                onClick={() => setCurrentView('settings')}
+                className={`flex flex-col items-center gap-1 ${currentView === 'settings' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
+            >
+                <ICONS.SettingsIcon size={24} />
+                <span className="text-[10px]">{t.settings[lang]}</span>
+            </button>
+          </nav>
+
+          <TransactionModal />
+          <PasswordModal />
+          <LogoutConfirmModal />
       </div>
 
-      {/* Mobile Bottom Nav */}
-      <nav className="md:hidden fixed bottom-0 w-full bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex justify-around p-3 z-30 print:hidden safe-area-bottom">
-        <button 
-            onClick={() => setCurrentView('dashboard')}
-            className={`flex flex-col items-center gap-1 ${currentView === 'dashboard' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
-        >
-            <ICONS.LayoutDashboard size={24} />
-            <span className="text-[10px]">{t.dashboard[lang]}</span>
-        </button>
-        <button 
-            onClick={() => setCurrentView('transactions')}
-            className={`flex flex-col items-center gap-1 ${currentView === 'transactions' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
-        >
-            <ICONS.List size={24} />
-            <span className="text-[10px]">{t.transactions[lang]}</span>
-        </button>
-        <button 
-            onClick={() => setCurrentView('settings')}
-            className={`flex flex-col items-center gap-1 ${currentView === 'settings' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}
-        >
-            <ICONS.SettingsIcon size={24} />
-            <span className="text-[10px]">{t.settings[lang]}</span>
-        </button>
-      </nav>
+      {/* Print View - Visible Only on Print */}
+      <div className="hidden print-visible">
+          <PrintReport state={state} lang={lang} />
+      </div>
 
-      <TransactionModal />
-      <PasswordModal />
-      <SyncModal />
     </div>
   );
 }

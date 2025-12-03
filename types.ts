@@ -1,3 +1,4 @@
+
 export type TransactionType = 'income' | 'expense';
 
 export interface Category {
@@ -43,4 +44,23 @@ export interface BackupData {
     timestamp: string;
     description: string;
   };
+}
+
+// Interface for the PWA install event
+export interface BeforeInstallPromptEvent extends Event {
+  readonly platforms: string[];
+  readonly userChoice: Promise<{
+    outcome: 'accepted' | 'dismissed';
+    platform: string;
+  }>;
+  prompt(): Promise<void>;
+}
+
+export interface FirebaseConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  storageBucket: string;
+  messagingSenderId: string;
+  appId: string;
 }
